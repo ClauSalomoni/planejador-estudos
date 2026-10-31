@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Planejador de Estudos</title>
+<style>
+:root{--bg:#f6f7f9;--fg:#1b1f24;--card:#fff;--bd:#d8dce2;--ac:#2456c8;--mut:#667}
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#15171a;--fg:#e8eaed;--card:#202327;--bd:#383d44;--ac:#7aa2ff;--mut:#9aa}}
+:root[data-theme="dark"]{--bg:#15171a;--fg:#e8eaed;--card:#202327;--bd:#383d44;--ac:#7aa2ff;--mut:#9aa}
+*{box-sizing:border-box}body{margin:0;font:15px/1.45 system-ui,sans-serif;background:var(--bg);color:var(--fg)}
+nav{display:flex;flex-wrap:wrap;gap:4px;padding:8px 12px;background:var(--card);border-bottom:1px solid var(--bd);position:sticky;top:env(safe-area-inset-top,0px)}
+nav button{margin:2px 4px;border:0;background:none;color:var(--fg);padding:8px 14px;border-radius:6px;cursor:pointer;font:inherit}
+nav button.on{background:var(--ac);color:#fff}
+main{max-width:1000px;margin:0 auto;padding:16px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:12px;margin:10px 0}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
+.big{font-size:1.6em;font-weight:700}.mut{color:var(--mut);font-size:.9em}
+input,select,textarea,button{font:inherit;color:inherit}
+input,select,textarea{background:var(--bg);border:1px solid var(--bd);border-radius:6px;padding:6px 8px;max-width:100%}
+textarea{width:100%;min-height:90px}label{display:inline-block;margin:4px 10px 4px 0}
+.btn{background:var(--ac);color:#fff;border:0;border-radius:6px;padding:8px 16px;margin:4px 8px 4px 0;cursor:pointer}
+.btn.sec{background:none;color:var(--ac);border:1px solid var(--ac)}.btn.sm{padding:4px 10px;margin:3px 6px 3px 0;font-size:.85em}td .btn{white-space:nowrap}
+table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:6px;border-bottom:1px solid var(--bd);vertical-align:top}
+.tag{display:inline-block;padding:1px 8px;border-radius:10px;color:#fff;font-size:.85em}
+.bar{height:10px;background:var(--bd);border-radius:5px;overflow:hidden}.bar i{display:block;height:100%;background:var(--ac)}
+#toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);padding:10px 16px;border-radius:8px;color:#fff;display:none}
+.warn{background:#fff3cd;color:#5c4400;padding:8px;border-radius:6px;margin:6px 0}
+dialog{background:var(--card);color:var(--fg);border:1px solid var(--bd);border-radius:8px}
+.done{opacity:.55}:focus-visible{outline:2px solid var(--ac);outline-offset:2px}
+</style>
+</head>
+<body>
+<nav id="nav"></nav><main id="main">Carregando…</main><div id="toast" role="status"></div>
+<dialog id="dlg"><form id="frm" style="min-width:280px"></form></dialog>
+<script>
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const DIAS=["Segunda","Terça","Quarta","Quinta","Sexta","Sábado","Domingo"];
+const TIPOS={teoria:"Teoria",questoes:"Questões",revisao:"Revisão",simulado:"Simulado"};
+const STATUS={nao_iniciado:"Não iniciado",em_andamento:"Em andamento",estudado:"Estudado",revisao_pendente:"Revisão pendente",dominado:"Dominado"};
+const ABAS=[["painel","Painel"],["edital","Edital"],["disp","Disponibilidade"],["prio","Prioridades"],["cron","Cronograma"],["rev","Revisões"]];
+let S=null,aba="painel",draft=[],avisos=[],vis={modo:"semana",ref:"",disc:""};
+
+function toast(m,erro){const t=$("#toast");t.textContent=m;t.style.background=erro?"#b3261e":"#1b7f3b";t.style.display="block";clearTimeout(toast.h);toast.h=setTimeout(()=>t.style.display="none",erro?6000:2500)}
+/* ===== Motor (port fiel de planner.py / edital.py) + armazenamento no navegador ===== */
+const KEY="estudos_estado_v1",PDFJS="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/";
+const CFG0={min_estudo:50,min_intervalo:10,min_bloco_final:25,pct_revisao:50,intervalos_revisao:[1,7,30],limiar_aproveitamento:70,dias_prova_reforco:14};
+const DISP0={0:[["14:30","18:00"]],1:[["14:30","16:15"]],2:[["14:30","18:00"]],3:[["14:30","16:15"]],4:[["14:30","18:00"]],5:[],6:[["08:00","11:00"],["15:00","18:00"]]};
+const novoEstado=()=>({concurso:{nome:"",cargo:"",data_prova:null},config:{...CFG0},disponibilidade:JSON.parse(JSON.stringify(DISP0)),confirmado:false,disciplinas:[],sessoes:[],registros:[],revisoes:[],prox_id:1});
+const nid=e=>e.prox_id++;
+const hojeS=()=>new Date().toLocaleDateString("sv");
+const DT=s=>new Date(s+"T12:00:00Z"),ISO=d=>d.toISOString().slice(0,10);
+const add=(s,n)=>{const d=DT(s);d.setUTCDate(d.getUTCDate()+n);return ISO(d)};
+const wd=s=>(DT(s).getUTCDay()+6)%7,dd=(a,b)=>Math.round((DT(a)-DT(b))/864e5);
+const h2m=h=>{const m=/^([01]?\d|2[0-3]):([0-5]\d)$/.exec(String(h).trim());if(!m)throw Error("Horário inválido: "+h);return +m[1]*60+ +m[2]};
+const m2h=m=>String(m/60|0).padStart(2,"0")+":"+String(m%60).padStart(2,"0");
+const ni=(v,pad,mn,mx)=>{if(v==null||v==="")return pad;const n=Math.trunc(Number(v));if(!Number.isFinite(n)||n<mn||n>mx)throw Error(`Valor fora do intervalo ${mn}-${mx}: ${v}`);return n};
+const sum=(l,k)=>l.reduce((s,x)=>s+x[k],0),cmp=(a,b)=>a<b?-1:a>b?1:0;
+function vConfig(c){const b={...CFG0,...c},o={min_estudo:ni(b.min_estudo,50,10,180),min_intervalo:ni(b.min_intervalo,10,0,60),pct_revisao:ni(b.pct_revisao,50,0,90),limiar_aproveitamento:ni(b.limiar_aproveitamento,70,0,100),dias_prova_reforco:ni(b.dias_prova_reforco,14,0,120)};
+  o.min_bloco_final=ni(b.min_bloco_final,25,5,o.min_estudo);let iv=b.intervalos_revisao;if(typeof iv==="string")iv=iv.split(/[,\s;]+/).filter(Boolean);iv=iv.map(x=>ni(x,1,1,365));
+  if(!iv.length||iv.some((x,i)=>i&&x<=iv[i-1]))throw Error("Intervalos de revisão devem ser crescentes e sem repetição.");o.intervalos_revisao=iv;return o}
+function vDisp(d){const o={};for(let i=0;i<7;i++){const j=(d[i]||[]).map(p=>{if(!Array.isArray(p)||p.length!==2)throw Error("Janela de horário malformada.");const a=h2m(p[0]),b=h2m(p[1]);if(b<=a)throw Error("O fim da janela deve ser depois do início.");return[a,b]}).sort((x,y)=>x[0]-y[0]);
+  for(let k=1;k<j.length;k++)if(j[k][0]<j[k-1][1])throw Error("Janelas sobrepostas no mesmo dia.");o[i]=j.map(([a,b])=>[m2h(a),m2h(b)])}return o}
+function blocosJ(a,b,c){const o=[];let t=a;for(;;){const r=b-t;if(r>=c.min_estudo){o.push([t,t+c.min_estudo]);t+=c.min_estudo+c.min_intervalo}else if(r>=c.min_bloco_final){o.push([t,b]);break}else break}return o}
+const blocosD=(w,d,c)=>(d[w]||[]).flatMap(([i,f])=>blocosJ(h2m(i),h2m(f),c)).sort((x,y)=>x[0]-y[0]);
+const liq=(d,c)=>[0,1,2,3,4,5,6].reduce((s,w)=>s+blocosD(w,d,c).reduce((x,[a,b])=>x+b-a,0),0);
+const bru=d=>[0,1,2,3,4,5,6].reduce((s,w)=>s+(d[w]||[]).reduce((x,[i,f])=>x+h2m(f)-h2m(i),0),0);
+function salvarDisc(e,l){if(!Array.isArray(l)||!l.length)throw Error("Informe ao menos uma disciplina.");
+  const old=Object.fromEntries(e.disciplinas.map(d=>[d.nome,d])),nomes=new Set(),novas=[];
+  for(const d of l){const nome=String(d.nome||"").replace(/\s+/g," ").trim().slice(0,200);if(!nome)throw Error("O nome da disciplina não pode ficar vazio.");
+    if(nomes.has(nome.toLowerCase()))throw Error("Disciplina duplicada: "+nome);nomes.add(nome.toLowerCase());
+    const o=old[nome],ot=new Map((o?o.topicos:[]).map(t=>[t.nome,t])),tops=[];
+    for(let nm of(d.topicos||[]).slice(0,500)){nm=String(nm).replace(/\s+/g," ").trim().slice(0,600);if(!nm)continue;const t=ot.get(nm);ot.delete(nm);tops.push(t||{id:nid(e),nome:nm,status:"nao_iniciado"})}
+    if(!tops.length)throw Error(`A disciplina '${nome}' precisa de ao menos um tópico.`);
+    const pn=d.peso===""||d.peso==null?null:Number(d.peso);if(pn!==null&&!(pn>=0&&pn<=1000))throw Error("Peso inválido.");
+    novas.push({id:o?o.id:nid(e),nome,bloco:String(d.bloco||"").slice(0,200),pagina:d.pagina??null,peso:pn,questoes:ni(d.questoes,null,0,1000),topicos:tops})}
+  const it=new Set(novas.flatMap(d=>d.topicos.map(t=>t.id))),ids=new Set(novas.map(d=>d.id));
+  e.disciplinas=novas;e.sessoes=e.sessoes.filter(s=>s.status!=="planejada"&&(s.topico_id==null||it.has(s.topico_id))&&(s.disciplina_id==null||ids.has(s.disciplina_id)));
+  e.revisoes=e.revisoes.filter(r=>it.has(r.topico_id));e.registros=e.registros.filter(r=>r.disciplina_id==null||ids.has(r.disciplina_id));e.confirmado=true}
+/* desempenho: [questões, acertos, soma dificuldade, nº dificuldades] por chave */
+const agg=(regs,key)=>{const r={};for(const g of regs){const k=g[key];if(k==null)continue;const x=r[k]||(r[k]=[0,0,0,0]);x[0]+=g.questoes;x[1]+=g.acertos;if(g.dificuldade){x[2]+=g.dificuldade;x[3]++}}return r};
+function fraqueza(e){const ag=agg(e.registros,"topico_id"),o={};for(const d of e.disciplinas)for(const t of d.topicos){const[q,a,ds,dn]=ag[t.id]||[0,0,0,0];let s=q?1-a/q:0;if(dn)s+=Math.max(0,ds/dn-3)/4;if(t.status==="revisao_pendente")s+=.5;o[t.id]=Math.round(s*1000)/1000}return o}
+const LIM=[[1.5,"muito alta"],[1.1,"alta"],[.7,"média"],[0,"baixa"]],pc=x=>(x*100).toFixed(0)+"%";
+function prioridades(e,hoje){const Ds=e.disciplinas;if(!Ds.length)return[];const n=Ds.length,lim=e.config.limiar_aproveitamento/100,base={},fonte={};
+  for(const d of Ds){const q=d.questoes||0,p=d.peso||0;if(q||p){base[d.id]=(q||1)*(p||1);fonte[d.id]="informado"}}
+  const inf=Object.values(base);
+  if(inf.length){const m=sum(inf.map(v=>({v})),"v")/inf.length;for(const d of Ds)if(!(d.id in base)){base[d.id]=m;fonte[d.id]="estimativa (média das informadas)"}}
+  else for(const d of Ds){base[d.id]=Math.max(1,d.topicos.length);fonte[d.id]="estimativa (nº de tópicos)"}
+  const tot=Object.values(base).reduce((a,b)=>a+b,0),des=agg(e.registros,"disciplina_id"),atr={},br={},out=[];
+  for(const r of e.revisoes)if(r.status==="pendente"&&r.data_prevista<hoje)atr[r.disciplina_id]=(atr[r.disciplina_id]||0)+1;
+  for(const d of Ds){const ied=base[d.id]/tot,mot=[],[q,a,ds,dn]=des[d.id]||[0,0,0,0];let f=1;
+    if(q>=10){const ap=a/q;if(ap<lim){f+=(lim-ap)*1.5;mot.push(`aproveitamento ${pc(ap)} abaixo de ${pc(lim)}`)}else if(ap>=.9){f-=.1;mot.push(`aproveitamento ${pc(ap)} (alto)`)}}
+    if(dn>=3){const dm=ds/dn;if(dm>=3.5){f+=(dm-3)*.15;mot.push(`dificuldade média ${dm.toFixed(1)}/5`)}else if(dm<=2){f-=.1;mot.push(`dificuldade média ${dm.toFixed(1)}/5 (baixa)`)}}
+    if(atr[d.id]){f+=Math.min(.2,.05*atr[d.id]);mot.push(`${atr[d.id]} revisão(ões) atrasada(s)`)}
+    f=Math.max(.75,Math.min(1.5,f));br[d.id]=ied*f;
+    out.push({id:d.id,nome:d.nome,peso:d.peso,questoes:d.questoes,n_topicos:d.topicos.length,importancia_edital:ied,fator:f,fonte:fonte[d.id],confianca:fonte[d.id]!=="informado"?"baixa":(d.questoes?"alta":"média"),_m:mot})}
+  const soma=Object.values(br).reduce((a,b)=>a+b,0);
+  for(const p of out){p.importancia_final=br[p.id]/soma;p.classe=LIM.find(([l])=>p.importancia_final*n>=l)[1];
+    const pt=[`${(p.importancia_edital*100).toFixed(1)}% da importância (${p.fonte})`,...p._m];delete p._m;if(p.fator!==1)pt.push(`ajuste x${p.fator.toFixed(2)} → ${(p.importancia_final*100).toFixed(1)}%`);p.justificativa=pt.join("; ")}
+  return out}
+function gerar(e,inicio,hoje){
+  if(!e.confirmado||!e.disciplinas.length)throw Error("Confirme as disciplinas na aba Edital antes de gerar o cronograma.");
+  const c=e.config,disp=e.disponibilidade,prova=e.concurso.data_prova;
+  let fim=prova&&prova>inicio?add(prova,-1):add(inicio,27);const mx=add(inicio,7*16-1);if(fim>mx)fim=mx;
+  const slots=[];for(let d=inicio;d<=fim;d=add(d,1))for(const[a,b]of blocosD(wd(d),disp,c))slots.push([d,a,b]);
+  if(!slots.length)throw Error("Não há horários disponíveis no período. Ajuste a disponibilidade.");
+  const pesos={},classe={},atual={};for(const p of prioridades(e,hoje)){pesos[p.id]=Math.max(p.importancia_final,1e-6);classe[p.id]=p.classe;atual[p.id]=0}
+  const fq=fraqueza(e),fila={};
+  for(const d of e.disciplinas)fila[d.id]=d.topicos.filter(t=>t.status==="nao_iniciado"||t.status==="em_andamento").sort((a,b)=>(a.status!=="em_andamento")-(b.status!=="em_andamento")).map(t=>t.id);
+  const revs=e.revisoes.filter(r=>r.status==="pendente").sort((a,b)=>cmp(a.data_prevista,b.data_prevista)||a.id-b.id);
+  const usadas=new Set(),rec=[],st={ultimo:null,ptr:0,last:null,np:0},sem={},sim=new Set();
+  slots.forEach(([d],i)=>(sem[Math.floor(dd(d,inicio)/7)]??=[]).push(i));
+  for(const[w,idx]of Object.entries(sem))if(w%2===1&&idx.length>=6)idx.slice(-3).forEach(i=>sim.add(i));
+  const escolher=cs=>{const tot=cs.reduce((s,c)=>s+pesos[c],0);cs.forEach(c=>atual[c]+=pesos[c]);let m=cs[0];for(const c of cs)if(atual[c]>atual[m]||(atual[c]===atual[m]&&c<m))m=c;atual[m]-=tot;return m};
+  const estudar=()=>{let cs=e.disciplinas.map(d=>d.id).filter(i=>fila[i].length);if(!cs.length)return null;if(cs.length>1&&cs.includes(st.last))cs=cs.filter(c=>c!==st.last);
+    const did=escolher(cs),tid=fila[did].shift();st.ultimo=[did,tid];rec.push([did,tid]);return["teoria",did,tid,null]};
+  const praticar=dia=>{for(const r of revs)if(!usadas.has(r.id)&&r.data_prevista<=dia){usadas.add(r.id);return["revisao",r.disciplina_id,r.topico_id,r.id]}
+    const extra=[];for(const d of e.disciplinas)for(const t of d.topicos)if(!rec.some(x=>x[0]===d.id&&x[1]===t.id)&&(t.status==="revisao_pendente"||(t.status==="estudado"&&(fq[t.id]||0)>=.5)))extra.push([d.id,t.id]);
+    st.np++;if(st.ultimo&&!(extra.length&&st.np%2===0)){const[d,t]=st.ultimo;st.ultimo=null;return["questoes",d,t,null]}
+    const pool=[];for(const[d,t]of[...extra,...rec])for(let k=0;k<1+Math.floor(2*(fq[t]||0));k++)pool.push([d,t]);
+    if(pool.length){const[d,t]=pool[st.ptr%pool.length];st.ptr++;return["questoes",d,t,null]}return null};
+  const ses=[];let acc=0;
+  slots.forEach(([dia,a,b],i)=>{let pct=c.pct_revisao/100;if(prova&&dd(prova,dia)<=c.dias_prova_reforco)pct=Math.max(pct,.7);acc+=pct;const pr=acc>=1-1e-9;if(pr)acc-=1;
+    let esc;if(sim.has(i))esc=["simulado",null,null,null];else{esc=pr?praticar(dia):null;esc=esc||estudar()||(pr?null:praticar(dia))}
+    if(!esc)return;const[tipo,did,tid,rid]=esc;st.last=did;
+    ses.push({data:dia,inicio:m2h(a),fim:m2h(b),minutos:b-a,tipo,disciplina_id:did,topico_id:tid,revisao_id:rid,prioridade:classe[did]??null,status:"planejada"})});
+  return ses}
+function regen(e,ini,hoje){const n=gerar(e,ini,hoje);e.sessoes=e.sessoes.filter(s=>!(s.status==="planejada"&&s.data>=ini));n.forEach(s=>s.id=nid(e));e.sessoes.push(...n);e.sessoes.sort((a,b)=>cmp(a.data,b.data)||cmp(a.inicio,b.inicio));return n.length}
+const achar=(l,i)=>{const x=l.find(x=>x.id===i);if(!x)throw Error("Registro não encontrado.");return x};
+const topico=(e,id)=>{for(const d of e.disciplinas)for(const t of d.topicos)if(t.id===id)return t};
+const novaRev=(e,t,did,num,data)=>e.revisoes.push({id:nid(e),topico_id:t.id,disciplina_id:did,numero:num,data_prevista:data,data_realizada:null,status:"pendente"});
+function finRev(e,rev,hoje,ap){const lim=e.config.limiar_aproveitamento/100,t=topico(e,rev.topico_id);rev.status="concluida";rev.data_realizada=hoje;
+  const rest=e.revisoes.filter(r=>r.topico_id===rev.topico_id&&r.status==="pendente");
+  if(ap!=null&&ap<lim){t.status="revisao_pendente";if(!rest.length)novaRev(e,t,rev.disciplina_id,Math.max(...e.revisoes.filter(r=>r.topico_id===rev.topico_id).map(r=>r.numero))+1,add(hoje,2))}else t.status=rest.length?"estudado":"dominado"}
+function dados(d,pad){const m=ni(d.minutos,pad,0,600),q=ni(d.questoes,0,0,1000),a=ni(d.acertos,0,0,1000);if(a>q)throw Error("Acertos não podem superar as questões resolvidas.");return[m,q,a,ni(d.dificuldade,3,1,5),String(d.obs||"").slice(0,1000)]}
+function concluirSessao(e,sid,d,hoje){const s=achar(e.sessoes,sid);if(s.status==="concluida")throw Error("Sessão já concluída.");const[m,q,a,dif,obs]=dados(d,s.minutos);s.status="concluida";
+  e.registros.push({id:nid(e),sessao_id:sid,data:hoje,disciplina_id:s.disciplina_id,topico_id:s.topico_id,tipo:s.tipo,minutos:m,questoes:q,acertos:a,erros:q-a,dificuldade:dif,obs});
+  const ap=q?a/q:null,lim=e.config.limiar_aproveitamento/100,t=s.topico_id?topico(e,s.topico_id):null;if(!t)return;
+  if(s.tipo==="teoria"){if(d.parcial)t.status="em_andamento";else{t.status="estudado";e.revisoes=e.revisoes.filter(r=>!(r.topico_id===t.id&&r.status==="pendente"));e.config.intervalos_revisao.forEach((x,i)=>novaRev(e,t,s.disciplina_id,i+1,add(hoje,x)))}}
+  else if(s.tipo==="revisao"){const r=e.revisoes.find(r=>r.id===s.revisao_id&&r.status==="pendente")||e.revisoes.filter(r=>r.topico_id===t.id&&r.status==="pendente").sort((a,b)=>a.numero-b.numero)[0];if(r)finRev(e,r,hoje,ap)}
+  else if(s.tipo==="questoes"&&ap!=null&&q>=5&&ap<lim&&(t.status==="estudado"||t.status==="dominado"))t.status="revisao_pendente"}
+function pular(e,sid){const s=achar(e.sessoes,sid);if(s.status!=="planejada")throw Error("Só é possível pular sessões planejadas.");s.status="pulada"}
+function acRev(e,rid,ac,d,hoje){const r=achar(e.revisoes,rid);if(r.status!=="pendente")throw Error("Revisão já concluída.");
+  if(ac==="concluir"){const[,q,a]=dados(d,0);finRev(e,r,hoje,q?a/q:null)}else if(ac==="antecipar")r.data_prevista=r.data_prevista<hoje?r.data_prevista:hoje;
+  else if(ac==="adiar")r.data_prevista=add(r.data_prevista>hoje?r.data_prevista:hoje,ni(d.dias,1,1,60));else throw Error("Ação desconhecida.")}
+function stats(e,hoje){const dp=e.disponibilidade,seg=add(hoje,-wd(hoje)),fs=add(seg,6),venc=e.sessoes.filter(s=>s.data<=hoje&&s.status!=="pulada"),fe=venc.filter(s=>s.status==="concluida"),
+  cont={nao_iniciado:0,em_andamento:0,estudado:0,revisao_pendente:0,dominado:0},sw={},pr=e.concurso.data_prova;
+  e.disciplinas.forEach(d=>d.topicos.forEach(t=>cont[t.status]++));
+  e.registros.forEach(r=>{if(r.questoes){const k=add(r.data,-wd(r.data)),x=sw[k]||(sw[k]=[0,0]);x[0]+=r.questoes;x[1]+=r.acertos}});
+  return{liquidos_min:liq(dp,e.config),brutos_min:bru(dp),planejados_semana_min:sum(e.sessoes.filter(s=>s.data>=seg&&s.data<=fs&&s.status!=="pulada"),"minutos"),
+    estudados_semana_min:sum(e.registros.filter(r=>r.data>=seg&&r.data<=fs),"minutos"),estudados_total_min:sum(e.registros,"minutos"),cumprimento:venc.length?Math.round(100*fe.length/venc.length):null,topicos:cont,
+    revisoes_atrasadas:e.revisoes.filter(r=>r.status==="pendente"&&r.data_prevista<hoje).length,
+    por_disciplina:e.disciplinas.map(d=>{const rg=e.registros.filter(r=>r.disciplina_id===d.id),q=sum(rg,"questoes"),a=sum(rg,"acertos");return{id:d.id,nome:d.nome,questoes:q,acertos:a,aproveitamento:q?a/q:null,minutos:sum(rg,"minutos")}}),
+    evolucao:Object.keys(sw).sort().map(k=>({semana:k,aproveitamento:sw[k][1]/sw[k][0]})),proximas:e.sessoes.filter(s=>s.status==="planejada"&&s.data>=hoje).slice(0,5),dias_prova:pr?dd(pr,hoje):null}}
+/* ---- edital (texto colado ou PDF via pdf.js) ---- */
+const NORM=s=>s.normalize("NFD").replace(/[\u0300-\u036f]/g,"").toUpperCase().trim(),MAI="A-ZÀ-ÖØ-Ý";
+function dividirTop(txt){const t=txt.replace(/\s+/g," ").trim();if(!t)return[];let it=t.split(new RegExp(`(?:(?<=\\s)|^)\\d{1,2}\\.\\s+(?=[${MAI}])`)).map(x=>x.trim()).filter(Boolean);
+  if(it.length<=1&&!/^\d{1,2}\.\s/.test(t))it=t.split(new RegExp(`(?<=[.;])\\s+(?=[${MAI}])`)).map(x=>x.trim()).filter(Boolean);return it.map(x=>x.replace(/[ .;]+$/,"")).filter(Boolean)}
+function interpretar(pags,cargo,exigir){const L=[];pags.forEach((tx,n)=>tx.split(/\r?\n/).forEach(l=>{l=l.replace(/\s+/g," ").trim();if(l&&!/^\d{1,3}$/.test(l))L.push([n+1,l])}));
+  let sec=null;for(let i=0;i<L.length;i++){const up=NORM(L[i][1]);if(/^ANEXO\s+II\b/.test(up)||/^CONTEUDO PROGRAMATICO\.?$/.test(up)){let f=L.findIndex((x,j)=>j>i&&/^ANEXO\s+(III|IV|V|VI|VII|VIII|IX|X)\b/.test(NORM(x[1])));if(f<0)f=L.length;if(!sec||f-i>sec[1]-sec[0])sec=[i,f]}}
+  let ln;if(!sec){if(exigir)throw Error("Não encontrei o 'Anexo II / Conteúdo programático'. Use a opção de colar o texto.");ln=L}else ln=L.slice(sec[0],sec[1]);
+  const av=[],marcas=[];ln.forEach((x,i)=>{if(/^(CARGOS?\s+\d{1,2}\b.*|\d{2}\s*[-–—:.]\s*(ANALISTA|TECNICO)\b.*)/.test(NORM(x[1])))marcas.push(i)});const cabs=marcas.map(i=>ln[i][1]);
+  if(!marcas.length){if(cargo)av.push("Não encontrei cabeçalhos de cargo; usei todo o trecho.")}else if(!cargo)av.push("Cargo não informado: usei todos os cargos do anexo.");
+  else{const q=NORM(cargo);let ok=false;for(let k=0;k<marcas.length;k++){const i=marcas[k],cab=NORM(ln[i][1]+" "+(ln[i+1]?ln[i+1][1]:""));
+    if(/^\d+$/.test(q)?new RegExp(`\\b0*${q}\\b`).test(cab):q.split(" ").every(w=>cab.includes(w))){ln=ln.slice(i+1,k+1<marcas.length?marcas[k+1]:ln.length);ok=true;break}}
+    if(!ok)throw Error("Cargo não encontrado. Cabeçalhos detectados: "+cabs.slice(0,30).join(" | "))}
+  const RD=new RegExp(`^([${MAI}][^:.;\\d]{2,90}):\\s*(.*)$`),RG=/CONHECIMENTOS|NOCOES|LEGISLACAO|BASICOS|ESPECIFICOS|GERAIS/,ds=[];let grupo="",at=null;
+  for(const[pg,l]of ln){if(l===l.toUpperCase()&&/[A-ZÀ-Ý]/.test(l)&&l.length<70&&RG.test(NORM(l))){grupo=l.toLowerCase().replace(/(^|\s)\S/g,c=>c.toUpperCase());at=null;continue}
+    const m=RD.exec(l);if(m){at={nome:m[1].trim(),bloco:grupo,pagina:pg,_t:[m[2]]};ds.push(at)}else if(at)at._t.push(l)}
+  const out=ds.map(d=>{const tx=d._t.join(" ").trim();return{nome:d.nome,bloco:d.bloco,pagina:d.pagina,peso:null,questoes:null,texto_original:tx,topicos:dividirTop(tx)}});
+  if(!out.length)throw Error("Nenhuma disciplina reconhecida (padrão 'Disciplina: tópicos'). Cole o texto ou cadastre manualmente.");
+  av.push("Tópicos foram separados automaticamente por numeração/pontuação (interpretação). Confira, e preencha pesos e nº de questões a partir da tabela de provas do edital.");
+  return{disciplinas:out,avisos:av,cargos_detectados:cabs}}
+async function lerPdf(buf){await new Promise((ok,no)=>{if(window.pdfjsLib)return ok();const s=document.createElement("script");s.src=PDFJS+"pdf.min.js";s.onload=ok;s.onerror=()=>no(Error("Não consegui carregar o leitor de PDF. Use 'Colar texto do Anexo II'."));document.head.appendChild(s)});
+  pdfjsLib.GlobalWorkerOptions.workerSrc=PDFJS+"pdf.worker.min.js";const doc=await pdfjsLib.getDocument({data:buf}).promise,pg=[];
+  for(let i=1;i<=Math.min(doc.numPages,400);i++){const c=await(await doc.getPage(i)).getTextContent(),ls=[];let y=null,l="";for(const it of c.items){const v=it.transform[5];if(y!==null&&Math.abs(v-y)>2){ls.push(l);l=""}l+=it.str;y=v}ls.push(l);pg.push(ls.join("\n"))}
+  if(pg.join("").trim().length<200)throw Error("PDF sem texto selecionável (provavelmente escaneado). Copie o texto do Anexo II e use 'Colar texto'.");return pg}
+/* ---- "API" local: mesma interface que o servidor Python, dados em localStorage ---- */
+let EST;try{EST=JSON.parse(localStorage.getItem(KEY))||novoEstado()}catch(_){EST=novoEstado()}
+const salvarLS=()=>{try{localStorage.setItem(KEY,JSON.stringify(EST))}catch(_){toast("Não consegui salvar neste navegador: gere um backup na aba Painel.",true)}};
+const visao=()=>({estado:EST,prioridades:prioridades(EST,hojeS()),stats:stats(EST,hojeS()),hoje:hojeS()});
+async function api(m,u,b){const[p,qs]=u.split("?"),hoje=hojeS();if(m==="GET")return visao();
+  if(p==="/api/edital/pdf")return interpretar(await lerPdf(b),new URLSearchParams(qs).get("cargo")||null,true);
+  if(p==="/api/edital/texto")return interpretar([String(b.texto||"")],b.cargo||null,false);
+  const e=structuredClone(EST);let extra={},x;
+  if(p==="/api/concurso"){const d=b.data_prova;if(d&&!/^\d{4}-\d\d-\d\d$/.test(d))throw Error("Data inválida (use AAAA-MM-DD).");e.concurso={nome:String(b.nome||"").slice(0,200),cargo:String(b.cargo||"").slice(0,200),data_prova:d||null}}
+  else if(p==="/api/config")e.config=vConfig(b);else if(p==="/api/disponibilidade")e.disponibilidade=vDisp(b);else if(p==="/api/disciplinas")salvarDisc(e,b);
+  else if(p==="/api/cronograma/gerar")extra={geradas:regen(e,add(hoje,1),hoje)};
+  else if(x=/^\/api\/sessoes\/(\d+)\/(concluir|pular)$/.exec(p)){x[2]==="concluir"?concluirSessao(e,+x[1],b||{},hoje):pular(e,+x[1])}
+  else if(x=/^\/api\/revisoes\/(\d+)\/(concluir|adiar|antecipar)$/.exec(p))acRev(e,+x[1],x[2],b||{},hoje);else throw Error("Rota não encontrada.");
+  EST=e;salvarLS();return{...visao(),...extra}}
+
+async function acao(fn,ok){try{const r=await fn();if(r&&r.estado){S=r;}if(ok)toast(ok);render()}catch(e){toast(e.message,true)}}
+const nome=id=>(S.estado.disciplinas.find(d=>d.id===id)||{}).nome||"—";
+const cor=id=>`hsl(${(id*67)%360},55%,42%)`;
+const tag=id=>id==null?'<span class="mut">geral</span>':`<span class="tag" style="background:${cor(id)}">${esc(nome(id))}</span>`;
+const topNome=id=>{for(const d of S.estado.disciplinas)for(const t of d.topicos)if(t.id===id)return t.nome;return ""};
+const hm=m=>`${Math.floor(m/60)}h${String(m%60).padStart(2,"0")}`;
+const brData=s=>s.split("-").reverse().join("/");
+const diaSem=s=>DIAS[(new Date(s+"T12:00").getDay()+6)%7];
+const segunda=s=>{const d=new Date(s+"T12:00");d.setDate(d.getDate()-((d.getDay()+6)%7));return d.toISOString().slice(0,10)};
+
+function conv(){draft=S.estado.disciplinas.map(d=>({nome:d.nome,bloco:d.bloco,pagina:d.pagina,peso:d.peso,questoes:d.questoes,topicos:d.topicos.map(t=>t.nome),orig:""}))}
+async function load(){S=await api("GET","/api/estado");conv();render()}
+
+function render(){
+  $("#nav").innerHTML=ABAS.map(([k,t])=>`<button class="${k===aba?"on":""}" data-a="${k}">${t}</button>`).join("");
+  $("#nav").querySelectorAll("button").forEach(b=>b.onclick=()=>{aba=b.dataset.a;render()});
+  ({painel,edital,disp,prio,cron,rev})[aba]();
+}
+
+function painel(){
+  const s=S.stats,e=S.estado;
+  const card=(t,v,x="")=>`<div class="card"><div class="mut">${t}</div><div class="big">${v}</div><div class="mut">${x}</div></div>`;
+  const dias=s.dias_prova;
+  $("#main").innerHTML=`<h2>${esc(e.concurso.nome||"Sem concurso cadastrado")}</h2>
+  ${!e.confirmado?'<div class="warn">Comece pela aba <b>Edital</b>: importe e confirme as disciplinas.</div>':""}
+  <div class="grid">
+  ${card("Horas da semana (janelas / líquidas)",`${hm(s.brutos_min)} / ${hm(s.liquidos_min)}`,"estudo líquido = sem intervalos")}
+  ${card("Planejado × estudado (semana)",`${hm(s.planejados_semana_min)} / ${hm(s.estudados_semana_min)}`)}
+  ${card("Cumprimento do cronograma",s.cumprimento==null?"—":s.cumprimento+"%","sessões vencidas concluídas")}
+  ${card("Revisões atrasadas",s.revisoes_atrasadas)}
+  ${card("Tempo até a prova",dias==null?"—":dias+" dias")}</div>
+  <div class="card"><b>Tópicos</b><div class="grid" style="margin-top:6px">${Object.entries(s.topicos).map(([k,v])=>`<div><div class="big">${v}</div><div class="mut">${STATUS[k]}</div></div>`).join("")}</div></div>
+  <div class="card"><b>Aproveitamento por disciplina</b>${s.por_disciplina.length?s.por_disciplina.map(d=>`<div style="margin:8px 0">${tag(d.id)} ${d.aproveitamento==null?'<span class="mut">sem questões</span>':Math.round(d.aproveitamento*100)+"% ("+d.acertos+"/"+d.questoes+")"} <span class="mut">· ${hm(d.minutos)} estudadas</span><div class="bar"><i style="width:${(d.aproveitamento||0)*100}%"></i></div></div>`).join(""):'<p class="mut">Sem dados.</p>'}</div>
+  <div class="card"><b>Evolução semanal (acertos)</b>${s.evolucao.length?`<table>${s.evolucao.map(x=>`<tr><td>Semana de ${brData(x.semana)}</td><td>${Math.round(x.aproveitamento*100)}%</td></tr>`).join("")}</table>`:'<p class="mut">Ainda sem registros.</p>'}</div>
+  <div class="card"><b>Próximas atividades</b>${s.proximas.length?`<table>${s.proximas.map(x=>`<tr><td>${diaSem(x.data)} ${brData(x.data)} ${x.inicio}</td><td>${TIPOS[x.tipo]}</td><td>${tag(x.disciplina_id)}</td><td>${esc(topNome(x.topico_id))}</td></tr>`).join("")}</table>`:'<p class="mut">Gere o cronograma.</p>'}</div>
+  <div class="card"><b>Backup e restauração</b><p class="mut">Seus dados ficam só neste navegador. Gere o backup, copie o texto e guarde num arquivo .json. Para restaurar (ou importar o <code>data/estado.json</code> da versão local), cole o texto abaixo.</p><textarea id="bk" aria-label="Backup"></textarea><button class="btn sec" id="bk_g">Gerar backup</button><button class="btn sec" id="bk_r">Restaurar do texto</button></div>`;
+  $("#bk_g").onclick=async()=>{$("#bk").value=JSON.stringify(EST);$("#bk").select();try{await navigator.clipboard.writeText($("#bk").value);toast("Backup copiado")}catch(_){toast("Backup gerado: copie o texto")}};
+  $("#bk_r").onclick=()=>{try{const o=JSON.parse($("#bk").value);if(!o||!Array.isArray(o.disciplinas)||!Array.isArray(o.sessoes))throw Error("Texto não parece um backup válido.");
+    if(!confirm("Isto substitui TODOS os dados atuais. Continuar?"))return;EST={...novoEstado(),...o};salvarLS();acao(async()=>visao(),"Dados restaurados")}catch(e){toast(e.message,true)}};
+}
+
+function edital(){
+  const c=S.estado.concurso;
+  $("#main").innerHTML=`<div class="card"><h3>Concurso</h3>
+  <label>Nome <input id="c_nome" value="${esc(c.nome)}" size="30"></label>
+  <label>Cargo (código ou nome, ex.: 03) <input id="c_cargo" value="${esc(c.cargo)}"></label>
+  <label>Data da prova <input type="date" id="c_prova" value="${c.data_prova||""}"></label>
+  <button class="btn" id="b_c">Salvar</button></div>
+  <div class="card"><h3>Importar conteúdo programático</h3>
+  <p class="mut">Envie o PDF do edital (lê o Anexo II do cargo informado) ou cole o texto.</p>
+  <input type="file" id="f_pdf" accept="application/pdf"> <button class="btn" id="b_pdf">Ler PDF</button>
+  <details style="margin-top:8px"><summary>Colar texto do Anexo II</summary><textarea id="t_col" placeholder="Disciplina: tópico. tópico. ..."></textarea><button class="btn sec" id="b_txt">Interpretar texto</button></details>
+  <div id="avisos">${avisos.map(a=>`<div class="warn">${esc(a)}</div>`).join("")}</div></div>
+  <div class="card"><h3>Disciplinas e tópicos</h3>
+  <p class="mut">Um tópico por linha. Peso e nº de questões vêm da tabela de provas do edital (deixe vazio se não souber: o sistema estima e avisa). Preencha questões em todas as disciplinas ou em nenhuma.</p>
+  <div id="ed"></div><button class="btn sec" id="b_add">+ Disciplina</button> <button class="btn" id="b_ok">Confirmar e salvar</button></div>`;
+  edEd();
+  $("#b_c").onclick=()=>acao(()=>api("PUT","/api/concurso",{nome:$("#c_nome").value,cargo:$("#c_cargo").value,data_prova:$("#c_prova").value||null}),"Concurso salvo");
+  const imp=async r=>{avisos=r.avisos;if(r.cargos_detectados.length)avisos=[...avisos,"Cargos detectados: "+r.cargos_detectados.join(" | ")];draft=r.disciplinas.map(d=>({...d,orig:d.texto_original}));toast("Extração concluída: revise abaixo");edital()};
+  $("#b_pdf").onclick=async()=>{const f=$("#f_pdf").files[0];if(!f)return toast("Escolha um PDF",true);
+    try{imp(await api("POST","/api/edital/pdf?cargo="+encodeURIComponent($("#c_cargo").value),await f.arrayBuffer(),true))}catch(e){toast(e.message,true)}};
+  $("#b_txt").onclick=async()=>{try{imp(await api("POST","/api/edital/texto",{texto:$("#t_col").value,cargo:$("#c_cargo").value}))}catch(e){toast(e.message,true)}};
+  $("#b_add").onclick=()=>{draft.push({nome:"Nova disciplina",bloco:"",peso:null,questoes:null,topicos:[],orig:""});edEd()};
+  $("#b_ok").onclick=()=>{if(S.estado.sessoes.some(s=>s.status==="planejada")&&!confirm("Salvar apagará as sessões planejadas (regenere depois). Continuar?"))return;
+    acao(async()=>{const r=await api("PUT","/api/disciplinas",draft.map(d=>({nome:d.nome,bloco:d.bloco,pagina:d.pagina,peso:d.peso,questoes:d.questoes,topicos:d.topicos})));avisos=[];return r},"Disciplinas confirmadas")};
+}
+function edEd(){
+  $("#ed").innerHTML=draft.map((d,i)=>`<div class="card" data-i="${i}">
+   <label>Nome <input data-k="nome" value="${esc(d.nome)}" size="32"></label>
+   <label>Peso <input data-k="peso" type="number" step="any" min="0" value="${d.peso??""}" style="width:80px"></label>
+   <label>Questões <input data-k="questoes" type="number" min="0" value="${d.questoes??""}" style="width:80px"></label>
+   <span class="mut">${esc(d.bloco||"")}${d.pagina?" · pág. "+d.pagina:""}</span>
+   <button class="btn sec sm" data-del="${i}">Excluir</button>
+   <textarea data-k="topicos" aria-label="Tópicos">${esc(d.topicos.join("\n"))}</textarea>
+   ${d.orig?`<details><summary class="mut">Texto original do edital</summary><div class="mut">${esc(d.orig)}</div></details>`:""}</div>`).join("");
+  $("#ed").querySelectorAll("[data-k]").forEach(el=>el.oninput=()=>{
+    const d=draft[el.closest("[data-i]").dataset.i],k=el.dataset.k;
+    d[k]=k==="topicos"?el.value.split("\n").map(x=>x.trim()).filter(Boolean):(k==="nome"?el.value:(el.value===""?null:Number(el.value)))});
+  $("#ed").querySelectorAll("[data-del]").forEach(b=>b.onclick=()=>{if(confirm("Excluir esta disciplina?")){draft.splice(+b.dataset.del,1);edEd()}});
+}
+
+function disp(){
+  const e=S.estado,c=e.config,s=S.stats;
+  $("#main").innerHTML=`<div class="card"><h3>Disponibilidade semanal</h3>
+  <p class="mut">Janelas no formato 14:30-18:00, separadas por vírgula. Vazio = sem estudo. Total: ${hm(s.brutos_min)} de janelas, <b>${hm(s.liquidos_min)}</b> de estudo líquido.</p>
+  ${DIAS.map((d,i)=>`<label style="display:block">${d} <input data-d="${i}" size="32" value="${esc(e.disponibilidade[i].map(j=>j.join("-")).join(", "))}"></label>`).join("")}
+  <button class="btn" id="b_d">Salvar disponibilidade</button></div>
+  <div class="card"><h3>Configurações</h3>
+  <label>Estudo (min) <input id="k_est" type="number" value="${c.min_estudo}" style="width:70px"></label>
+  <label>Intervalo (min) <input id="k_int" type="number" value="${c.min_intervalo}" style="width:70px"></label>
+  <label>Bloco final mín. (min) <input id="k_fin" type="number" value="${c.min_bloco_final}" style="width:70px"></label>
+  <label>% revisão/questões <input id="k_pct" type="number" value="${c.pct_revisao}" style="width:70px"></label>
+  <label>Revisões (dias) <input id="k_rev" value="${c.intervalos_revisao.join(", ")}" style="width:110px"></label>
+  <label>Limiar de aproveitamento % <input id="k_lim" type="number" value="${c.limiar_aproveitamento}" style="width:70px"></label>
+  <label>Reforço nos últimos N dias <input id="k_ref" type="number" value="${c.dias_prova_reforco}" style="width:70px"></label>
+  <button class="btn" id="b_k">Salvar configurações</button>
+  <p class="mut">Depois de alterar, regenere o cronograma.</p></div>`;
+  $("#b_d").onclick=()=>{const o={};document.querySelectorAll("[data-d]").forEach(i=>{o[i.dataset.d]=i.value.split(",").map(x=>x.trim()).filter(Boolean).map(x=>x.split("-").map(y=>y.trim()))});
+    acao(()=>api("PUT","/api/disponibilidade",o),"Disponibilidade salva")};
+  $("#b_k").onclick=()=>acao(()=>api("PUT","/api/config",{min_estudo:$("#k_est").value,min_intervalo:$("#k_int").value,min_bloco_final:$("#k_fin").value,pct_revisao:$("#k_pct").value,intervalos_revisao:$("#k_rev").value,limiar_aproveitamento:$("#k_lim").value,dias_prova_reforco:$("#k_ref").value}),"Configurações salvas");
+}
+
+function prio(){
+  const p=S.prioridades;
+  $("#main").innerHTML=`<div class="card"><h3>Análise de prioridades</h3>
+  <p class="mut">Importância = peso × questões (informados por você) ou estimativa, claramente rotulada. O desempenho (erros em questões, dificuldade relatada 1-5 e revisões atrasadas) só ajusta entre ×0,75 e ×1,5; nunca apaga a importância do edital. Erros/dificuldade também escolhem quais tópicos praticar.</p>
+  ${p.length?`<div style="overflow-x:auto"><table><tr><th>Disciplina</th><th>Peso</th><th>Questões</th><th>Tópicos</th><th>Importância</th><th>Prioridade</th><th>Confiança</th><th>Justificativa</th></tr>
+  ${p.map(x=>`<tr><td>${tag(x.id)}</td><td>${x.peso??"—"}</td><td>${x.questoes??"—"}</td><td>${x.n_topicos}</td><td>${(x.importancia_final*100).toFixed(1)}%</td><td><b>${x.classe}</b></td><td>${x.confianca}</td><td class="mut">${esc(x.justificativa)}</td></tr>`).join("")}</table></div>`:'<p class="mut">Confirme as disciplinas primeiro.</p>'}</div>`;
+}
+
+function cron(){
+  const ss=S.estado.sessoes;
+  const semanas=[...new Set(ss.map(s=>segunda(s.data)))].sort();
+  if(!vis.ref||vis.modo==="semana"&&!semanas.includes(vis.ref))vis.ref=semanas.find(w=>w>=segunda(S.hoje))||semanas[0]||"";
+  let lista=ss;
+  if(vis.modo==="semana")lista=ss.filter(s=>segunda(s.data)===vis.ref);
+  else if(vis.modo==="dia")lista=ss.filter(s=>s.data===(vis.dia||S.hoje));
+  else lista=ss.filter(s=>String(s.disciplina_id)===String(vis.disc||S.estado.disciplinas[0]?.id));
+  let h="",ult="";
+  for(const s of lista){
+    if(s.data!==ult){ult=s.data;h+=`<tr><th colspan="6">${diaSem(s.data)} ${brData(s.data)}${s.data===S.hoje?" (hoje)":""}</th></tr>`}
+    h+=`<tr class="${s.status!=="planejada"?"done":""}"><td>${s.inicio}–${s.fim}</td><td>${tag(s.disciplina_id)}</td><td>${TIPOS[s.tipo]}</td><td>${esc(topNome(s.topico_id))}</td><td>${s.prioridade||""}</td>
+    <td>${s.status==="planejada"?`<button class="btn sm" data-c="${s.id}">Concluir</button> <button class="btn sec sm" data-p="${s.id}">Pular</button>`:s.status}</td></tr>`}
+  $("#main").innerHTML=`<div class="card"><button class="btn" id="b_g">Gerar / regerar cronograma</button>
+  <span class="mut"> (substitui só as sessões planejadas a partir de amanhã)</span></div>
+  <div class="card"><label>Visão <select id="v_m"><option value="semana">Semana</option><option value="dia">Dia</option><option value="disc">Por disciplina</option></select></label>
+  ${vis.modo==="semana"?`<label>Semana <select id="v_r">${semanas.map(w=>`<option value="${w}" ${w===vis.ref?"selected":""}>${brData(w)}</option>`).join("")}</select></label>`:""}
+  ${vis.modo==="dia"?`<label>Dia <input type="date" id="v_d" value="${vis.dia||S.hoje}"></label>`:""}
+  ${vis.modo==="disc"?`<label>Disciplina <select id="v_s">${S.estado.disciplinas.map(d=>`<option value="${d.id}" ${String(d.id)===String(vis.disc)?"selected":""}>${esc(d.nome)}</option>`).join("")}</select></label>`:""}
+  <div style="overflow-x:auto"><table>${h||'<tr><td class="mut">Nenhuma sessão neste filtro.</td></tr>'}</table></div></div>`;
+  $("#v_m").value=vis.modo;
+  $("#v_m").onchange=e=>{vis.modo=e.target.value;cron()};
+  if($("#v_r"))$("#v_r").onchange=e=>{vis.ref=e.target.value;cron()};
+  if($("#v_d"))$("#v_d").onchange=e=>{vis.dia=e.target.value;cron()};
+  if($("#v_s"))$("#v_s").onchange=e=>{vis.disc=e.target.value;cron()};
+  $("#b_g").onclick=()=>acao(async()=>{const r=await api("POST","/api/cronograma/gerar",{});toast(r.geradas+" sessões geradas");return r});
+  document.querySelectorAll("[data-p]").forEach(b=>b.onclick=()=>acao(()=>api("POST",`/api/sessoes/${b.dataset.p}/pular`,{}),"Sessão pulada"));
+  document.querySelectorAll("[data-c]").forEach(b=>b.onclick=()=>concluir(ss.find(s=>s.id==b.dataset.c)));
+}
+function concluir(s){
+  $("#frm").innerHTML=`<h3>${TIPOS[s.tipo]}: ${esc(topNome(s.topico_id)||"Simulado")}</h3>
+  <label>Minutos <input name="minutos" type="number" min="0" value="${s.minutos}" style="width:80px"></label>
+  <label>Questões <input name="questoes" type="number" min="0" value="0" style="width:80px"></label>
+  <label>Acertos <input name="acertos" type="number" min="0" value="0" style="width:80px"></label>
+  <label>Dificuldade (1-5, entra no cálculo) <input name="dificuldade" type="number" min="1" max="5" value="3" style="width:60px"></label>
+  ${s.tipo==="teoria"?'<label><input type="checkbox" name="parcial"> Não terminei o tópico</label>':""}
+  <label style="display:block">Observações <textarea name="obs" style="min-height:50px"></textarea></label>
+  <button class="btn" value="ok">Salvar</button> <button class="btn sec" type="button" id="x">Cancelar</button>`;
+  $("#x").onclick=()=>$("#dlg").close();
+  $("#frm").onsubmit=ev=>{ev.preventDefault();const f=new FormData($("#frm"));const o=Object.fromEntries(f);o.parcial=f.has("parcial");
+    $("#dlg").close();acao(()=>api("POST",`/api/sessoes/${s.id}/concluir`,o),"Sessão registrada")};
+  $("#dlg").showModal();
+}
+
+function rev(){
+  const hoje=S.hoje,rs=S.estado.revisoes.filter(r=>r.status==="pendente").sort((a,b)=>a.data_prevista.localeCompare(b.data_prevista));
+  $("#main").innerHTML=`<div class="card"><h3>Revisões pendentes</h3>${rs.length?`<div style="overflow-x:auto"><table>
+  <tr><th>Data</th><th>Disciplina</th><th>Tópico</th><th>Nº</th><th></th></tr>
+  ${rs.map(r=>`<tr><td>${brData(r.data_prevista)}${r.data_prevista<hoje?' <b style="color:#b3261e">atrasada</b>':""}</td><td>${tag(r.disciplina_id)}</td><td>${esc(topNome(r.topico_id))}</td><td>${r.numero}ª</td>
+  <td><button class="btn sm" data-r="concluir" data-id="${r.id}">Concluir</button> <button class="btn sec sm" data-r="adiar" data-id="${r.id}">Adiar 1d</button> <button class="btn sec sm" data-r="antecipar" data-id="${r.id}">Antecipar</button></td></tr>`).join("")}</table></div>`:'<p class="mut">Nenhuma revisão pendente. Elas são criadas ao concluir sessões de teoria.</p>'}</div>`;
+  document.querySelectorAll("[data-r]").forEach(b=>b.onclick=()=>{
+    const a=b.dataset.r,body={};
+    if(a==="concluir"){const q=prompt("Questões resolvidas na revisão (0 se nenhuma):","0");if(q===null)return;const ac=+q?prompt("Acertos:","0"):"0";if(ac===null)return;body.questoes=q;body.acertos=ac}
+    acao(()=>api("POST",`/api/revisoes/${b.dataset.id}/${a}`,body),"Revisão atualizada")});
+}
+load().catch(e=>toast(e.message,true));
+</script>
+</body>
+</html>
